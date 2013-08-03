@@ -4,12 +4,10 @@
 //
 //** Preliminary version **
 //	03-08-2013
-//	- External interrupt switched to Pin interrupt
-//	(unwanted interrupts triggered with external interrupts)
-// 	- Timer interrupts tested fine
-//	- Code size = 274 bytes
+//	- Added calls to eeprom functions
+//	(contained in header file eeprom.h)
+//	- Code size = 352 bytes
 //
-
 
 // AVR IO include (must be called before delay.h)
 #include <avr/io.h>
@@ -19,6 +17,9 @@
 
 // AVR Interrupt include
 #include <avr/interrupt.h>
+
+// EEPROM include
+#include "eeprom.h"
 
 #ifndef F_CPU
 	#define F_CPU 128000UL // Define software reference clock
@@ -67,6 +68,7 @@
 // Global Variables
 uint8_t TimerCount = 0x00;
 uint8_t TrigCount = 0x00;
+uint8_t delay = 0x00;
 
 // ** EXTERNAL/PIN INTERRUPT ROUTINE **
 EXTINT_VECT {
@@ -91,13 +93,15 @@ EXTINT_VECT {
 TIMER_VECT {
 	PORTB ^= (1<<LED);		// Toggle LED pin
 
-	if(TimerCount < 6) {	// After 6 timer interrupt, switch to pin interrupt routine
-		TIMER_VAL = 106;	// Setup 300ms delay (256 - 106 = 150 * 2ms = 300ms)
+	if(TimerCount < 10) {	// After 10 timer interrupts, switch to pin interrupt routine
+		delay = delay + 10; // Decrease delay
+		TIMER_VAL = delay;	// Initialize timer with new delay value
 		TimerCount++;
 	}
 	else {
 		TIMER_DIS;			// Disable Timer
 		TimerCount = 0;
+		delay = EEPROM_read(0x00); // Retrieve init delay value
 		EXTINT_EN;			// Enable External interrupts
 	}
 }
@@ -114,7 +118,13 @@ int main (void) {
 	SET_ANYEDGE;		// Set External interrupt on any edge
 
 	PORTB |= (1<<LED); 	// Set 1 on LED pin (turn led on)
-	TIMER_VAL = 106;	// Setup 300ms delay (256 - 106 = 150 * 2ms = 300ms)
+
+
+	EEPROM_write(0x00, 106);	// Setup starting delay to 300ms (256 - 106 = 150 * 2ms = 300ms)
+								// And write in eeprom
+	delay = EEPROM_read(0x00);	// Init delay value
+	TIMER_VAL = delay;			// Initialize timer with delay value
+
 	TIMER_EN;			// Enable Timer
 
 	sei(); 				// Enable Global interrupts
