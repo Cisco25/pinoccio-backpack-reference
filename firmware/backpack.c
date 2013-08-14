@@ -3,10 +3,11 @@
 //Author: Cisco
 //
 //** Preliminary version **
-//	03-08-2013
-//	- Added calls to eeprom functions
-//	(contained in header file eeprom.h)
-//	- Code size = 352 bytes
+//	08-14-2013
+//	- Re-assigned ATtiny pinmap to match backpack pinmap
+//	- Implemented reception of a byte from host (tested with Arduino Micro)
+//	- Using byte value to control timer delay
+//	- Code size = 460 bytes
 //
 
 // AVR IO include (must be called before delay.h)
@@ -37,7 +38,7 @@
 	#define SET_ANYEDGE MCUCR=(1<<ISC00); 					// Set external interrupt on any edge
 	#define SET_RISING 	MCUCR=(1<<ISC01)|(1<<ISC00);  		// Set external interrupt at rising edge
 	#define SET_FALLING MCUCR=(1<<ISC01); 					// Set external interrupt at falling edge
-	#define EXTINT_CHK	(GIMSK&(1<<INT0))==(1<<INT0) 		// Read interrupt status
+	#define EXTINT_CHK	(GIMSK&(1<<INT0))==(1<<INT0) 		// Read interrupt state
 
 	//#define EXTINT_VECT ISR(INT0_vect)  					// External interrupt service routine
 	#define EXTINT_VECT ISR(PCINT0_vect)  					// Pin interrupt service routine
@@ -54,88 +55,109 @@
 	#define INIT_AVR 	CLKPR=(1<<CLKPCE);	/* To enable write of Clock Prescaler */ 		\
 						CLKPR=0;			/* Clock Prescaler = 0 (Clock = 128kHz) */ 		\
 						GIMSK=0;			/* Init GIMSK register (external interrupt) */ 	\
-						PCMSK=(1<<PCINT4);	/* Configure PB4 as an interrupt pin source */	\
+						PCMSK=(1<<PCINT0);	/* Configure PB0 as an interrupt pin source */	\
 						TIMSK0=0;			/* Init TIMSK register (timer interrupt) */		\
 						TCCR0A=0;			/* Timer Interrupt in Normal operation mode */	\
-						TCCR0B=(1<<CS02);	/* Set Timer Interrupt Prescaler to 256
-											   (1 cycle = 256/128000 = 2ms)
-	**/
+						TCCR0B=(1<<CS02);	//Set Timer Interrupt Prescaler to 256 (1 cycle = 256/128000 = 2ms)
+	// **
 #endif
 
-#define TRIG	PB4	// Define external trigger on PB4
-#define LED		PB0	// Define led on PB0
+#define BKPK_BUS	PB0 // Define Backpack Bus pin on PB0
+#define LED			PB2	// Define Led on PB2
+#define LED2		PB3	// Define Led2 on PB4
 
 // Global Variables
-uint8_t TimerCount = 0x00;
-uint8_t TrigCount = 0x00;
+uint8_t timerCount = 0x00;
+uint8_t intCount = 0x00;
+
+uint8_t data = 0x00;
 uint8_t delay = 0x00;
+
+uint8_t state = 0xFF;
 
 // ** EXTERNAL/PIN INTERRUPT ROUTINE **
 EXTINT_VECT {
-	if (bit_is_set(PINB, TRIG))		// If TRIG pin is high
-		PORTB |= (1<<LED); 			// Set 1 on LED pin (turn led on)
+	if (bit_is_clear(PINB, BKPK_BUS)) {	// If BKPK_BUS pin is low
+		PORTB &= ~(1<<LED2);			// Turn off Led2
 
-	if (bit_is_clear(PINB, TRIG))	// If TRIG pin is low
-		PORTB &= ~(1<<LED); 		// Set 0 on LED pin (turn led off)
+		if (state==0xFF)				// If state is in timer mode
+			state = 0; 					// Switch state to read mode
 
-	if (TrigCount < 10) {	// After 10 pin interrupt, switch to timer interrupt routine
-		TrigCount++;
-	}
-	else {
-		EXTINT_DIS;			// Disable External interrupts
-		TrigCount = 0;
-		TIMER_EN;			// Enable Timer
+		EXTINT_DIS;						// Disable external interrupts
+
+		TCCR0B = (1<<CS00);	 			// Disable Timer Interrupt Prescaler (1 cycle = 1/128000 = 7.8125us)
+		TIMER_VAL = 240;				// delay = 16 * 7.8125 = 125us
+		TIMER_EN;						// Enable timer interrupts
 	}
 }
 // **
 
 // ** TIMER INTERRUPT ROUTINE **
 TIMER_VECT {
-	PORTB ^= (1<<LED);		// Toggle LED pin
+	switch(state) {
+		case 0:			// Read mode: read incoming byte on Backpack bus and assign value to delay
+			TIMER_DIS;						// Disable timer interrupt: Next bit should be read after pin interrupt only
 
-	if(TimerCount < 10) {	// After 10 timer interrupts, switch to pin interrupt routine
-		delay = delay + 10; // Decrease delay
-		TIMER_VAL = delay;	// Initialize timer with new delay value
-		TimerCount++;
-	}
-	else {
-		TIMER_DIS;			// Disable Timer
-		TimerCount = 0;
-		delay = EEPROM_read(0x00); // Retrieve init delay value
-		EXTINT_EN;			// Enable External interrupts
+			if (bit_is_set(PINB, BKPK_BUS)) // If backpack bus is high: write 1 to the corresponding data bit
+				data += (1<<intCount);		// else: do not modify data value
+
+			intCount++;						// Increment interrupt counter (bit number)
+
+			if(intCount > 7) {				// If we received all bits
+				PORTB |= (1<<LED2);			// Data received OK: turn on Led2
+
+				delay = data;				// Assign data value to delay
+				state = 0xFF;				// Switch to Timer mode
+
+				data = 0x00;				// Reset data
+				intCount = 0x00;			// Reset interrupt counter (bit number)
+
+				TCCR0B = (1<<CS02);			// Set Timer Interrupt Prescaler to 256 (1 cycle = 256/128000 = 2ms)
+				TIMER_VAL = delay;			// Set new timer value
+				TIMER_EN;					// Enable timer interrupts
+			}
+
+			EXTINT_EN;						// Enable external interrupts
+			break;
+
+		case 0xFF: 		// Timer mode: blink Led according to delay value
+			PORTB ^= (1<<LED);				// Toggle Led pin
+			TIMER_VAL = delay;				// Set timer value
+
+			if (bit_is_set(PINB, LED2)) {	// If Led2 is on (data reception confirmation)
+				timerCount++;				// Increment timer counter
+				if(timerCount > 6) {		// If greater than 6
+					PORTB &= ~(1<<LED2);	// Turn off Led2
+					timerCount = 0x00;		// Reset timer counter
+				}
+			}
+			break;
+
+		default:		// Do nothing
+			break;
 	}
 }
 // **
 
 // ** MAIN LOOP **
 int main (void) {
+	DDRB &= ~(1<<BKPK_BUS); 		// Set input direction on Backpack Bus
+	DDRB |= (1<<LED)|(1<<LED2); 	// Set output direction on LEDs
 
-	DDRB &= ~(1<<TRIG); // Set input direction on TRIG (PB4)
-	DDRB |= (1<<LED); 	// Set output direction on LED (PB0)
+	PORTB &= ~(1<<LED)|~(1<<LED2); 	// Set 0 on LED pins (turn leds off)
 
-	INIT_AVR;			// Initializes ATtiny registers
+	INIT_AVR;						// Initializes ATtiny registers
 
-	SET_ANYEDGE;		// Set External interrupt on any edge
+	EEPROM_write(0x00, 0x6A);		// Write delay value in eeprom address 0x00
+									// 0x6A => 300ms (256 - 106 = 150 * 2ms = 300ms)
+	delay = EEPROM_read(0x00);		// Read delay value
 
-	PORTB |= (1<<LED); 	// Set 1 on LED pin (turn led on)
+	TIMER_VAL = delay;				// Initialize timer with delay value
+	TIMER_EN;						// Enable timer interrupts
 
-
-	EEPROM_write(0x00, 106);	// Setup starting delay to 300ms (256 - 106 = 150 * 2ms = 300ms)
-								// And write in eeprom
-	delay = EEPROM_read(0x00);	// Init delay value
-	TIMER_VAL = delay;			// Initialize timer with delay value
-
-	TIMER_EN;			// Enable Timer
+	EXTINT_EN;						// Enable external Interrupt
 
 	sei(); 				// Enable Global interrupts
-
-	//No more needed (using timer interrupts)
-	//for(uint8_t count=0; count<5; count++) {
-	//	PORTB |= (1<<LED); 		// Set 1 on LED pin (turn led on)
-	//	_delay_ms(500); 		// 500ms delay
-	//	PORTB &= ~(1<<LED); 	// Set 0 on LED pin (turn led off)
-	//	_delay_ms(500); 		// 500ms delay
-	//}
 
 	for (;;) {			// Empty loop is required (else interrupts would not trigger)
 	}
